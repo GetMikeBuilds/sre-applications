@@ -1,0 +1,19 @@
+name: Bulid App Pipeline
+on:
+  push:
+    branches: ['main']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code 
+        uses: actions/checkout@v4
+      
+      - name: List files 
+        run: |
+          echo "====当前所在目录===="
+          pwd 
+          echo "=== 根目录下面的文件列表 ==="
+          ls -la 
+          echo "===python-app 子目录下的文件列表" 
+          ls -la python-app/
