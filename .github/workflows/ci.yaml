@@ -6,6 +6,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Lowercase Repository Name 
+        run: |
+          echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> ${GITHUB_ENV}
+
       - name: Checkout Code 
         uses: actions/checkout@v4
       
@@ -25,4 +29,4 @@ jobs:
           context: ./python-app
           file: ./python-app/Dockerfile 
           push: true 
-          tags: ghcr.io/${{ github.repository }}/python-app:${{ github.sha }}
+          tags: ghcr.io/${{ env.REPO_LC }}/python-app:${{ github.sha }}
