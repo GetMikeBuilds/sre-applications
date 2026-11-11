@@ -48,7 +48,7 @@ jobs:
         run: |
           curl -sLO "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.8.3/kustomize_v5.8.3_linux_amd64.tar.gz"       
           tar -xzf kustomize_v5.8.3_linux_amd64.tar.gz
-          sudo mv Kustomize /usr/local/bin
+          sudo mv kustomize /usr/local/bin
           kustomize version
 
       - name: Update Image add Push 
