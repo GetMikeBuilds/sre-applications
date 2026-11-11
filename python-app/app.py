@@ -33,12 +33,8 @@ DB_CONFIG = {
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
-            if random.random() < 0.5:
-                self.send_response(500)
-                REQUEST_COUNT.labels(path="/health", status="500").inc()
-            else:
-                self.send_response(200)
-                REQUEST_COUNT.labels(path="/health", status="200").inc()
+            self.send_response(200)
+            REQUEST_COUNT.labels(path="/health", status="200").inc()
             self.end_headers()
             self.wfile.write(b"done\n")
             return
