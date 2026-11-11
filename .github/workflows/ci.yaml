@@ -33,3 +33,31 @@ jobs:
           file: ./python-app/Dockerfile 
           push: true 
           tags: ghcr.io/${{ env.REPO_LC }}/python-app:${{ github.sha }}
+  
+  update-gitops:
+    needs: build 
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout GitOps Repo 
+        uses: actions/checkout@v4 
+        with:
+          repository: 'GetMikeBuilds/sre-gitops'
+          token: ${{ secret.GITOPS_PAT }}
+          path: 'gitops-repo'
+      - name: Install Kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv Kustomize /usr/local/bin
+
+      - name: Update Image add Push 
+        run: |
+          cd gitops-repo/manifests/base
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          kustomize edit set image localhost:5001/sre-python-api=ghcr.io/${REPO_LC}/python-app:${{ github.sha }}
+          
+          # 配置 Git 机器人身份并提交
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          git add .
+          git commit -m "chore(gitops): auto update image to ${REPO_LC}/python-app:${{ github.sha }}"
+          git push origin main
