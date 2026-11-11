@@ -42,7 +42,7 @@ jobs:
         uses: actions/checkout@v4 
         with:
           repository: 'GetMikeBuilds/sre-gitops'
-          token: ${{ secret.GITOPS_PAT }}
+          token: ${{ secrets.GITOPS_PAT }}
           path: 'gitops-repo'
       - name: Install Kustomize
         run: |
