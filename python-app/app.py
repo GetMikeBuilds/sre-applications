@@ -1,12 +1,14 @@
-
 import os
 import logging
-import random
+import redis
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
-
 import psycopg
 
+REDIS_HOST = os.environ.get("REDIS_HOST", "rfr-redis")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
+# 修复点 1：拼写错误
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, socket_connect_timeout=2)
 
 REQUEST_COUNT = Counter(
     "python_api_requests_total", "Total HTTP requests", ["path", "status"]
@@ -21,7 +23,7 @@ logging.basicConfig(
 )
 
 DB_CONFIG = {
-    "host": os.environ.get("DB_HOST", "db"),
+    "host": os.environ.get("DB_HOST", "python-api-db-rw"),
     "port": int(os.environ.get("DB_PORT", "5432")),
     "dbname": os.environ.get("DB_NAME", "sre_lab"),
     "user": os.environ.get("DB_USER", "sre_user"),
@@ -29,14 +31,14 @@ DB_CONFIG = {
     "connect_timeout": 3,
 }
 
-
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # 修复点 2：/health 仅做最轻量的存活检查，绝不查任何中间件！
         if self.path == "/health":
             self.send_response(200)
             REQUEST_COUNT.labels(path="/health", status="200").inc()
             self.end_headers()
-            self.wfile.write(b"done\n")
+            self.wfile.write(b"ok\n")
             return
         
         if self.path == "/metrics":
@@ -47,33 +49,37 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        # 修复点 3：在就绪探针里同时检查 DB 和 Redis
         if self.path == "/db-health":
             try:
+                # 1. 检查数据库
                 with psycopg.connect(**DB_CONFIG) as conn:
                     with conn.cursor() as cur:
                         cur.execute("SELECT 1")
                         result = cur.fetchone()
-
                 if result != (1,):
                     raise RuntimeError("Unexpected database health query result")
+                
+                # 2. 检查 Redis
+                redis_client.set("health_check", "ok", ex=10)
+                val = redis_client.get("health_check")
+                if val != b"ok":
+                    raise Exception("Redis read/write failed")
 
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(b"database ok\n")
+                self.wfile.write(b"database and redis ok\n")
                 
-                # 【修复点 1】：连库成功，指标设为 1
                 DB_HEALTH.set(1)
-                # 【修复点 2】：这里的 path 应该是 "/db-health"
                 REQUEST_COUNT.labels(path="/db-health", status="200").inc()
                 return
 
-            except Exception:
-                logging.exception("Database health check failed")
+            except Exception as e:
+                logging.exception("Dependency health check failed")
                 self.send_response(503)
                 self.end_headers()
-                self.wfile.write(b"database unavailable\n")
+                self.wfile.write(b"dependency unavailable\n")
                 
-                # 【修复点 3】：连库失败，指标设为 0
                 DB_HEALTH.set(0)
                 REQUEST_COUNT.labels(path="/db-health", status="503").inc()
                 return
@@ -86,8 +92,6 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         logging.info("%s - %s", self.address_string(), format % args)
 
-
 server = ThreadingHTTPServer(("0.0.0.0", 8000), Handler)
 print("Server listening on port 8000", flush=True)
 server.serve_forever()
-
