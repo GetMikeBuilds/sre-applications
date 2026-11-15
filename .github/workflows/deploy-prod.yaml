@@ -1,0 +1,31 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy-prod:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout GitOps Repo
+        uses: actions/checkout@v4
+        with:
+          repository: "GetMikeBuilds/sre-gitops"
+          token: ${{ secrets/GITOPS_PAT }}
+          path: 'gitops-repo'
+      - name: Update Prod Image
+        run: | 
+          cd: gitops-repo/manifests/overlays/prod
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+
+          # 修改 prod 的镜像为最新的 commit hash
+          kustomize edit set image localhost:5001/sre-python-api=ghcr.io/${REPO_LC}/python-app:${{ github.sha }}
+          
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          git add .
+          git commit -m "chore(prod): promote image to ${{ github.sha }}"
+          git push origin main
