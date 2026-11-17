@@ -1,5 +1,10 @@
 import os
 import logging
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
 import redis
 from redis.sentinel import Sentinel
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -11,11 +16,17 @@ REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 REDIS_SENTINEL_PORT = int(os.environ.get("REDIS_SENTINEL_PORT", "26379"))
 
+# 配置 OpenTelemetry 导出到 Tempo
+resource = Resource.create(attributes={"service.name": "python-api"})
+provider = TracerProvider(resource=resource)
+otlp_exporter = OTLPSpanExporter(endpoint="http://tempo.monitoring.svc.cluster.local:4317", insecure=True)
+provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer(__name__)
+
 redis_client = None
 try:
-    # 1. 连接 Sentinel 集群（3个哨兵）
     sentinel = Sentinel([(REDIS_HOST, REDIS_SENTINEL_PORT)], socket_timeout=2)
-    # 2. 向哨兵要主节点连接。注意：Bitnami Chart 默认的 master 名字是 "mymaster"
     redis_client = sentinel.master_for('mymaster', socket_timeout=2)
 except Exception as e:
     logging.error(f"Failed to init Redis Sentinel: {e}")
@@ -43,13 +54,14 @@ DB_CONFIG = {
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # 【补回来的 /health 接口，专供 livenessProbe 存活探针使用】
         if self.path == "/health":
             self.send_response(200)
-            REQUEST_COUNT.labels(path="/health", status="200").inc()
             self.end_headers()
             self.wfile.write(b"ok\n")
+            REQUEST_COUNT.labels(path="/health", status="200").inc()
             return
-        
+
         if self.path == "/metrics":
             body = generate_latest()
             self.send_response(200)
@@ -58,43 +70,45 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        # 【唯一的 /db-health 接口，集成了 Trace】
         if self.path == "/db-health":
-            try:
-                # 1. 检查数据库
-                with psycopg.connect(**DB_CONFIG) as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT 1")
-                        result = cur.fetchone()
-                if result != (1,):
-                    raise RuntimeError("Unexpected database health query result")
-                
-                # 2. 检查 Redis (如果 redis_client 没初始化成功，这里会直接抛异常)
-                if not redis_client:
-                    raise RuntimeError("Redis client not initialized")
+            with tracer.start_as_current_span("db_health_check") as span:
+                try:
+                    with tracer.start_as_current_span("postgres_query"):
+                        with psycopg.connect(**DB_CONFIG) as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("SELECT 1")
+                                result = cur.fetchone()
+                    if result != (1,):
+                        raise RuntimeError("Unexpected database health query result")
                     
-                redis_client.set("health_check", "ok", ex=10)
-                val = redis_client.get("health_check")
-                if val != b"ok":
-                    raise Exception("Redis read/write failed")
+                    with tracer.start_as_current_span("redis_query"):
+                        if not redis_client:
+                            raise RuntimeError("Redis client not initialized")
+                        redis_client.set("health_check", "ok", ex=10)
+                        val = redis_client.get("health_check")
+                        if val != b"ok":
+                            raise Exception("Redis read/write failed")
 
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b"database and redis ok\n")
-                
-                DB_HEALTH.set(1)
-                REQUEST_COUNT.labels(path="/db-health", status="200").inc()
-                return
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b"database and redis ok\n")
+                    
+                    DB_HEALTH.set(1)
+                    REQUEST_COUNT.labels(path="/db-health", status="200").inc()
+                    return
 
-            except Exception as e:
-                logging.exception("Dependency health check failed")
-                self.send_response(503)
-                self.end_headers()
-                self.wfile.write(b"dependency unavailable\n")
-                
-                DB_HEALTH.set(0)
-                REQUEST_COUNT.labels(path="/db-health", status="503").inc()
-                return
+                except Exception as e:
+                    logging.exception("Dependency health check failed")
+                    self.send_response(503)
+                    self.end_headers()
+                    self.wfile.write(b"dependency unavailable\n")
+                    
+                    DB_HEALTH.set(0)
+                    REQUEST_COUNT.labels(path="/db-health", status="503").inc()
+                    return
 
+        # 兜底 404
         self.send_response(404)
         self.end_headers()
         self.wfile.write(b"not found\n")

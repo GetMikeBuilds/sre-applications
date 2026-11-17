@@ -1,3 +1,6 @@
 psycopg[binary]>=3.2,<4
 prometheus_client
 redis
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-otlp
