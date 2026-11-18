@@ -1,25 +1,36 @@
 import os
 import logging
-import psycopg
-import redis
-from opentelemetry import trace 
+from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
+import redis
 from redis.sentinel import Sentinel
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
-
+import psycopg
 
 # 从环境变量获取 Redis 地址和哨兵端口
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 REDIS_SENTINEL_PORT = int(os.environ.get("REDIS_SENTINEL_PORT", "26379"))
 
-# 配置 OpenTelemetry 导出到 Tempo
-resource = Resource.create(attributes={"service.name": "python-api"})
+# ==========================================
+# 【核心修改区】：配置 OpenTelemetry 并注入环境变量
+# ==========================================
+# 获取当前 Pod 的 Namespace（由 Downward API 注入）
+namespace = os.environ.get("POD_NAMESPACE", "unknown")
+
+# 配置 OpenTelemetry 导出到 Tempo，并把环境标识打进去
+resource = Resource.create(attributes={
+    "service.name": "python-api",
+    "k8s.namespace.name": namespace,          # 标准 K8s 属性
+    "deployment.environment": namespace       # 业界标准的环境属性
+})
+
 provider = TracerProvider(resource=resource)
+# Tempo 默认的 OTLP gRPC 接收端口是 4317
 otlp_exporter = OTLPSpanExporter(endpoint="http://tempo.monitoring.svc.cluster.local:4317", insecure=True)
 provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
 trace.set_tracer_provider(provider)
@@ -28,29 +39,26 @@ tracer = trace.get_tracer(__name__)
 # ==========================================
 # 【核心修改区】：日志与 TraceID 绑定
 # ==========================================
-# 1. 定义过滤器，从当前上下文获取 TraceID
 class TraceFilter(logging.Filter):
     def filter(self, record):
         span = trace.get_current_span()
         if span and span.get_span_context().is_valid:
-            # 把 trace_id 转成 32 位十六进制字符串
             record.trace_id = format(span.get_span_context().trace_id, '032x')
         else:
             record.trace_id = "00000000000000000000000000000000"
         return True
 
-# 2. 修改日志配置，在 format 中加入 trace_id
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [trace_id=%(trace_id)s] %(message)s",
 )
 
-# 3. 把过滤器应用到根 Logger 的所有 Handler 上
 for handler in logging.root.handlers:
     handler.addFilter(TraceFilter())
+
 # ==========================================
-
-
+# Redis 和 业务初始化
+# ==========================================
 redis_client = None
 try:
     sentinel = Sentinel([(REDIS_HOST, REDIS_SENTINEL_PORT)], socket_timeout=2)
@@ -63,11 +71,6 @@ REQUEST_COUNT = Counter(
 )
 DB_HEALTH = Gauge(
     "python_api_db_health", "1 if DB reachable, 0 otherwise"
-)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
 )
 
 DB_CONFIG = {
