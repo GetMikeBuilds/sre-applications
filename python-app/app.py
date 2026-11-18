@@ -1,15 +1,16 @@
 import os
 import logging
-from opentelemetry import trace
+import psycopg
+import redis
+from opentelemetry import trace 
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
-import redis
 from redis.sentinel import Sentinel
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
-import psycopg
+
 
 # 从环境变量获取 Redis 地址和哨兵端口
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
@@ -23,6 +24,32 @@ otlp_exporter = OTLPSpanExporter(endpoint="http://tempo.monitoring.svc.cluster.l
 provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
 trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
+
+# ==========================================
+# 【核心修改区】：日志与 TraceID 绑定
+# ==========================================
+# 1. 定义过滤器，从当前上下文获取 TraceID
+class TraceFilter(logging.Filter):
+    def filter(self, record):
+        span = trace.get_current_span()
+        if span and span.get_span_context().is_valid:
+            # 把 trace_id 转成 32 位十六进制字符串
+            record.trace_id = format(span.get_span_context().trace_id, '032x')
+        else:
+            record.trace_id = "00000000000000000000000000000000"
+        return True
+
+# 2. 修改日志配置，在 format 中加入 trace_id
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [trace_id=%(trace_id)s] %(message)s",
+)
+
+# 3. 把过滤器应用到根 Logger 的所有 Handler 上
+for handler in logging.root.handlers:
+    handler.addFilter(TraceFilter())
+# ==========================================
+
 
 redis_client = None
 try:
@@ -51,6 +78,7 @@ DB_CONFIG = {
     "password": os.environ.get("DB_PASSWORD", ""),
     "connect_timeout": 3,
 }
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
